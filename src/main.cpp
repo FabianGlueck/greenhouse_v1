@@ -2,6 +2,16 @@
 #include <Wire.h>
 #include <Adafruit_Sensor.h>
 #include <Adafruit_BME280.h>
+#include <BH1750.h>
+BH1750 lightMeter;
+bool bh_present = false;
+
+// Helper: read lux (returns negative on error)
+float readLux() {
+  // BH1750::readLightLevel() returns lux as float
+  return lightMeter.readLightLevel();
+}
+
 
 const int PIN_SOIL = A0;
 const int PIN_LED = LED_BUILTIN;  // eingebaute LED (Pin 13 beim Uno)
@@ -53,12 +63,18 @@ void scanI2COnce() {
 // BME280
 Adafruit_BME280 bme;
 bool bme_present = false;
-unsigned long lastBmeLog = 0;
-const unsigned long BME_INTERVAL = 5000UL; // ms
+
+// Unified logging interval for all sensors
+unsigned long lastLogTime = 0;
+const unsigned long LOG_INTERVAL = 2000UL; // ms (2 seconds)
 
 void setup() {
   Serial.begin(9600);
+  delay(500);  // Give Serial time to stabilize
   Wire.begin();
+  delay(100);  // Give Wire time to initialize
+
+  Serial.println("\n=== GREENHOUSE STARTUP ===");
 
   // LEDs
   pinMode(PIN_LED, OUTPUT);
@@ -68,17 +84,28 @@ void setup() {
   digitalWrite(PIN_LED_EXT, LOW);
   digitalWrite(PIN_RELAY, HIGH);
 
+  // Scan I2C bus first to see what's actually present
+  Serial.println("Scanning I2C bus...");
+  scanI2COnce();
+
   // Try both common I2C addresses for BME280 (0x76 and 0x77)
+  Serial.println("Initializing BME280...");
   if (bme.begin(0x76)) {
     bme_present = true;
-    Serial.println("BME280 found at 0x76");
+    Serial.println("✓ BME280 found at 0x76");
   } else if (bme.begin(0x77)) {
     bme_present = true;
-    Serial.println("BME280 found at 0x77");
+    Serial.println("✓ BME280 found at 0x77");
   } else {
-    Serial.println("BME280 not found");
-    // Print what else is on the I2C bus to help debugging
-    scanI2COnce();
+    Serial.println("✗ BME280 not found (check wiring & I2C address)");
+  }
+  // BH1750 (light sensor) initialization
+  Serial.println("Initializing BH1750...");
+  if (lightMeter.begin()) {
+    bh_present = true;
+    Serial.println("✓ BH1750 light sensor found");
+  } else {
+    Serial.println("✗ BH1750 not found");
   }
   // Puffer vorfüllen
   for (int i = 0; i < N; i++) {
@@ -86,6 +113,8 @@ void setup() {
     sum += buf[i];
     delay(5);
   }
+  
+  Serial.println("=== STARTUP COMPLETE ===\n");
 }
 
 void loop() {
@@ -113,28 +142,39 @@ if (ledOn && mapped < 40) {
   digitalWrite(PIN_RELAY, HIGH);
 }
 
-  Serial.print("RAW:");
-  Serial.print(raw);
-  Serial.print("  SMOOTH:");
-  Serial.print(s);
-  Serial.print("  Moisture%:");
-  Serial.println(mapped);
-
-  // Periodic BME280 logging every BME_INTERVAL ms
-  if (bme_present && (millis() - lastBmeLog >= BME_INTERVAL)) {
-    float t = bme.readTemperature(); // degC
-    float h = bme.readHumidity();    // %
-    float p = bme.readPressure() / 100.0F; // hPa
-
-    Serial.print("BME Temp:C ");
-    Serial.print(t, 2);
-    Serial.print("  Humidity:% ");
-    Serial.print(h, 2);
-    Serial.print("  Pressure:hPa ");
-    Serial.println(p, 2);
-
-    lastBmeLog = millis();
+  // Periodic unified logging every LOG_INTERVAL ms
+  if (millis() - lastLogTime >= LOG_INTERVAL) {
+    Serial.print("Soil RAW:");
+    Serial.print(raw);
+    Serial.print(" SMOOTH:");
+    Serial.print(s);
+    Serial.print(" Moisture%:");
+    Serial.print(mapped);
+    
+    if (bme_present) {
+      float t = bme.readTemperature(); // degC
+      float h = bme.readHumidity();    // %
+      float p = bme.readPressure() / 100.0F; // hPa
+      Serial.print(" | Temp:");
+      Serial.print(t, 1);
+      Serial.print("C Humid:");
+      Serial.print(h, 1);
+      Serial.print("% Press:");
+      Serial.print(p, 0);
+      Serial.print("hPa");
+    }
+    
+    if (bh_present) {
+      float lux = readLux();
+      Serial.print(" | Lux:");
+      if (lux < 0) {
+        Serial.print("ERROR");
+      } else {
+        Serial.print(lux, 0);
+      }
+    }
+    
+    Serial.println();
+    lastLogTime = millis();
   }
-
-  delay(250);
 }
