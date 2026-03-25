@@ -3,6 +3,7 @@
 #include <Adafruit_Sensor.h>
 #include <Adafruit_BME280.h>
 #include <BH1750.h>
+#include <ezButton.h>
 BH1750 lightMeter;
 bool bh_present = false;
 
@@ -13,26 +14,36 @@ float readLux() {
 }
 
 
-const int PIN_SOIL = A0;
+// Bodenfeuchte-Sensoren: Links=A2, Mitte=A0, Rechts=A3
+const int NUM_SOIL = 3;
+const int PIN_SOIL[NUM_SOIL] = {A2, A0, A3};       // Links, Mitte, Rechts
+const char* SOIL_LABEL[NUM_SOIL] = {"L", "M", "R"}; // Labels für Serial-Output
+
 const int PIN_LED = LED_BUILTIN;  // eingebaute LED (Pin 13 beim Uno)
 const int PIN_LED_EXT = 8;         // externe LED an D8
-const int PIN_RELAY = 9;         // Relais-Input an D8 (aktiviert bei hoher Feuchte)
+const int PIN_RELAY = 9;         // Relais-Input an D9
+const int TASTER_1_PIN = 10;
+const int TASTER_2_PIN = 11;
+const int TASTER_3_PIN = 12;
 
+ezButton BUTTON1(TASTER_1_PIN);
+ezButton BUTTON2(TASTER_2_PIN);
+ezButton BUTTON3(TASTER_3_PIN);
 // Kalibrierwerte nachher anpassen!
 int DRY_RAW = 500;  // trocken
 int WET_RAW = 330;  // nass
 
 const int N = 10;   // Fenstergröße für Glättung
-int buf[N];
-int idx = 0;
-long sum = 0;
+int buf[NUM_SOIL][N];
+int idx[NUM_SOIL] = {0, 0, 0};
+long sum[NUM_SOIL] = {0, 0, 0};
 
-int smooth(int x) {
-  sum -= buf[idx];
-  buf[idx] = x;
-  sum += buf[idx];
-  idx = (idx + 1) % N;
-  return sum / N;
+int smooth(int sensor, int x) {
+  sum[sensor] -= buf[sensor][idx[sensor]];
+  buf[sensor][idx[sensor]] = x;
+  sum[sensor] += x;
+  idx[sensor] = (idx[sensor] + 1) % N;
+  return sum[sensor] / N;
 }
 
 int clamp(int v, int lo, int hi) {
@@ -76,6 +87,11 @@ void setup() {
 
   Serial.println("\n=== GREENHOUSE STARTUP ===");
 
+  //Button Setup
+  BUTTON1.setDebounceTime(100);  // set debounce time to 100 milliseconds
+  BUTTON2.setDebounceTime(100);  // set debounce time to 100 milliseconds
+  BUTTON3.setDebounceTime(100);  // set debounce time to 100 milliseconds
+
   // LEDs
   pinMode(PIN_LED, OUTPUT);
   pinMode(PIN_LED_EXT, OUTPUT);
@@ -107,50 +123,79 @@ void setup() {
   } else {
     Serial.println("✗ BH1750 not found");
   }
-  // Puffer vorfüllen
-  for (int i = 0; i < N; i++) {
-    buf[i] = analogRead(PIN_SOIL);
-    sum += buf[i];
-    delay(5);
+  // Puffer vorfüllen für alle 3 Sensoren
+  for (int s = 0; s < NUM_SOIL; s++) {
+    for (int i = 0; i < N; i++) {
+      buf[s][i] = analogRead(PIN_SOIL[s]);
+      sum[s] += buf[s][i];
+      delay(5);
+    }
   }
   
   Serial.println("=== STARTUP COMPLETE ===\n");
 }
 
 void loop() {
-  int raw = analogRead(PIN_SOIL);
-  int s = smooth(raw);
+  BUTTON1.loop();  // Update button state
+  BUTTON2.loop();  // Update button state
+  BUTTON3.loop();  // Update button state
 
-  // Hinweis: Beim kapazitiven Sensor gilt oft: kleiner RAW = nasser
-  // Auf Prozent mappen (0% = trocken, 100% = nass) anhand deiner Kalibrierung
-  int mapped = map(clamp(s, WET_RAW, DRY_RAW), DRY_RAW, WET_RAW, 0, 100);
-  mapped = clamp(mapped, 0, 100);
+  // Alle 3 Bodenfeuchte-Sensoren auslesen
+  int raw[NUM_SOIL], sm[NUM_SOIL], moistPct[NUM_SOIL];
+  for (int i = 0; i < NUM_SOIL; i++) {
+    raw[i] = analogRead(PIN_SOIL[i]);
+    sm[i] = smooth(i, raw[i]);
+    moistPct[i] = map(clamp(sm[i], WET_RAW, DRY_RAW), DRY_RAW, WET_RAW, 0, 100);
+    moistPct[i] = clamp(moistPct[i], 0, 100);
+  }
 
-static bool ledOn = false;  // Merkt sich aktuellen LED-Zustand
+static bool relayOn = false;  // Merkt sich aktuellen Relais-Zustand
+static bool buttonToggled = false;
 
-if (!ledOn && mapped >= 50) {
-  ledOn = true;
-  digitalWrite(PIN_LED, HIGH);
-  digitalWrite(PIN_LED_EXT, HIGH);
-  digitalWrite(PIN_RELAY, LOW);
-}
+  if (BUTTON1.isPressed()){
+      digitalWrite(PIN_LED_EXT, HIGH);
+      Serial.println("The button 1 is pressed");
+    }
+    if (BUTTON1.isReleased()){
+      digitalWrite(PIN_LED_EXT, LOW);
+      Serial.println("The button 1 is released");
+    }
 
-if (ledOn && mapped < 40) {
-  ledOn = false;
-  digitalWrite(PIN_LED, LOW);
-  digitalWrite(PIN_LED_EXT, LOW);
-  digitalWrite(PIN_RELAY, HIGH);
-}
+    if (BUTTON2.isPressed()){
+      digitalWrite(PIN_LED_EXT, HIGH);
+      Serial.println("The button 2 is pressed");
+    }
+
+    if (BUTTON2.isReleased()){
+      digitalWrite(PIN_LED_EXT, LOW);
+      Serial.println("The button 2 is released");
+    }
+
+    if (BUTTON3.isPressed()){
+      digitalWrite(PIN_LED_EXT, HIGH);
+      Serial.println("The button 3 is pressed");
+    }
+    if (BUTTON3.isReleased()){
+      digitalWrite(PIN_LED_EXT, LOW);
+      Serial.println("The button 3 is released");
+    }
+
 
   // Periodic unified logging every LOG_INTERVAL ms
+  // Format: Soil_L RAW:x SMOOTH:x Moist%:x | Soil_M RAW:x ... | Soil_R RAW:x ... | Temp:... | Lux:...
   if (millis() - lastLogTime >= LOG_INTERVAL) {
-    Serial.print("Soil RAW:");
-    Serial.print(raw);
-    Serial.print(" SMOOTH:");
-    Serial.print(s);
-    Serial.print(" Moisture%:");
-    Serial.print(mapped);
-    
+    for (int i = 0; i < NUM_SOIL; i++) {
+      if (i > 0) Serial.print(" | ");
+      Serial.print("Soil_");
+      Serial.print(SOIL_LABEL[i]);
+      Serial.print(" RAW:");
+      Serial.print(raw[i]);
+      Serial.print(" SMOOTH:");
+      Serial.print(sm[i]);
+      Serial.print(" Moist%:");
+      Serial.print(moistPct[i]);
+    }
+
     if (bme_present) {
       float t = bme.readTemperature(); // degC
       float h = bme.readHumidity();    // %
@@ -163,7 +208,7 @@ if (ledOn && mapped < 40) {
       Serial.print(p, 0);
       Serial.print("hPa");
     }
-    
+
     if (bh_present) {
       float lux = readLux();
       Serial.print(" | Lux:");
@@ -173,7 +218,7 @@ if (ledOn && mapped < 40) {
         Serial.print(lux, 0);
       }
     }
-    
+
     Serial.println();
     lastLogTime = millis();
   }
